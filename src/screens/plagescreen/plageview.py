@@ -1,17 +1,18 @@
 from flet import *
 import sqlite3
-from fpdf import FPDF
 import os
-from math import ceil
 
 DB_PATH = "data/rapport.db"
 
+from .gereratorpdf import GeneratorPDF
+from .generatordocx import GeneratorDOCX
 class PlageView(View):
     def __init__(self, page):
         super().__init__(route="/")
         self.page = page
         self.projet=self.page.data["projet"]
         self.projet_id = self.projet["id"]
+        self.repports_list=[]
 
         self.start_date_dropdown = Dropdown(label="Date début",expand=True)
         self.end_date_dropdown = Dropdown(label="Date fin",expand=True)
@@ -32,8 +33,12 @@ class PlageView(View):
             SafeArea(
                 Column(
                     [
-                    self.back_cnt,
-                    Text("Filtrer les rapports par période"),
+                    Row(
+                        [
+                        self.back_cnt,
+                        Text("Filtrer les rapports par période")
+                        ]
+                    ),
                     Container(
                         # expand=True,
                         content=Row(
@@ -47,7 +52,12 @@ class PlageView(View):
                     ElevatedButton("Afficher les rapports", on_click=self.filter_reports),
                     Divider(),
                     self.report_list,
-                    ElevatedButton("Générer PDF", on_click=self.generate_pdf),
+                    Row(
+                        [
+                            ElevatedButton("Générer PDF", on_click=self.generate_pdf),
+                            ElevatedButton("Générer DOCX", on_click=self.generate_docx),
+                        ],alignment=MainAxisAlignment.SPACE_EVENLY
+                    )
                     ]
                 ), expand=True
             )
@@ -105,6 +115,12 @@ class PlageView(View):
         )
         reports = cursor.fetchall()
         conn.close()
+        # print(reports)
+        des=["title", "content", "rapport_date"]
+        if reports:
+            for report in reports:
+                rep=dict(zip(des, report))
+                self.repports_list.append(rep)
 
         if not reports:
             self.report_list.controls.append(Text("Aucun rapport trouvé pour cette période."))
@@ -116,40 +132,47 @@ class PlageView(View):
                             content=Column([
                                 Text(f"📅 {date}", weight="bold"),
                                 Text(f"📝 {title}" ),
-                                Text(content),
+                                Row([
+                                    Text(content, weight=FontWeight.W_100, size=12, theme_style=TextThemeStyle.BODY_MEDIUM)
+                                ]),
                             ]),
                             padding=10
                         )
                     )
                 )
         self.page.update()
-    
-    def generate_pdf(self, e):
+
+    def generate_docx(self, e):
         start = self.start_date_dropdown.value
         end = self.end_date_dropdown.value
-
-        if not start or not end:
+        reports=self.repports_list
+        print(reports)
+        if not reports:
             self.dialog = AlertDialog(
-                title=Text("⚠️ Choisir les deux dates.")
+                title=Text("Aucun rapport trouvé.")
                 )
             self.page.open(self.dialog)
             self.page.update()
             return
 
-        conn = sqlite3.connect(DB_PATH)
-        cursor = conn.cursor()
-        cursor.execute(
-            """
-            SELECT rapport_date, title, content
-            FROM rapports
-            WHERE projet_id = ? AND rapport_date BETWEEN ? AND ?
-            ORDER BY rapport_date ASC
-            """,
-            (self.projet_id, start, end)
-        )
-        reports = cursor.fetchall()
-        conn.close()
+        # Sauvegarde du PDF
+        output_dir = "generated_docs"
+        rapport_title=f"Rapports du {start} au {end}"
+        os.makedirs(output_dir, exist_ok=True)
+        filename = f"{output_dir}/{rapport_title}.docx"
 
+        # Création du DOCX
+        docx = GeneratorDOCX(donnees=reports,titre=rapport_title,filename=filename)
+        docx.create_docx()
+
+
+        self.page.open(SnackBar(Text(f"✅ PDF généré avec succès : {filename}")))
+        self.page.update()
+    
+    def generate_pdf(self, e):
+        start = self.start_date_dropdown.value
+        end = self.end_date_dropdown.value
+        reports=self.repports_list
         if not reports:
             self.dialog = AlertDialog(
                 title=Text("Aucun rapport trouvé.")
@@ -159,66 +182,29 @@ class PlageView(View):
             return
 
         # Création du PDF
-        pdf = FPDF()
+        rapport_title=f"Rapports du {start} au {end}"
+        pdf = GeneratorPDF(rappor_title=rapport_title)
+        pdf.set_auto_page_break(auto=True, margin=15)
         pdf.add_page()
-        pdf.set_font("Arial", size=12)
+        pdf.set_font("Helvetica", size=12)
 
-        # Titre
-        pdf.set_font("Arial", style="B", size=14)
-        pdf.cell(200, 10, f"Rapports du {start} au {end}", ln=True, align="C")
-        pdf.ln(10)
+        # Largeurs des colonnes
+        col_widths = [30, 40, 120]
 
         # En-têtes du tableau
-        pdf.set_font("Arial", style="B", size=12)
-        pdf.cell(40, 10, "Date", 1)
-        pdf.cell(50, 10, "Titre", 1)
-        pdf.cell(100, 10, "Contenu", 1)
+        headers = ["Date", "Titre", "Activités"]
+        for i in range(len(headers)):
+            pdf.cell(col_widths[i], 10, headers[i], border=1, align="C")
         pdf.ln()
 
-        pdf.set_font("Arial", size=10)
-        for report_date, title, content in reports:
-            col_widths = [40, 50, 100]
-            line_height = 6  # Hauteur de ligne standard
-            x_start = pdf.get_x()
-            y_start = pdf.get_y()
+        # Données
+        for report in reports:
+            pdf.table_row(report, col_widths)
 
-            # Calcule le nombre de lignes nécessaires pour chaque cellule
-            content_lines = ceil(len(content) / 70)  # approx pour 100 de large
-            title_lines = ceil(len(title) / 35)      # approx pour 50 de large
-            max_lines = max(content_lines, title_lines, 1)
-            row_height = max_lines * line_height
-
-            # --- Cellule DATE ---
-            pdf.set_xy(x_start, y_start)
-            pdf.multi_cell(col_widths[0], row_height, report_date, border=1)
-
-            # --- Cellule TITRE ---
-            pdf.set_xy(x_start + col_widths[0], y_start)
-            pdf.multi_cell(col_widths[1], row_height, title, border=1)
-
-            # --- Cellule CONTENU (avec saut automatique sur plusieurs lignes) ---
-            pdf.set_xy(x_start + col_widths[0] + col_widths[1], y_start)
-            current_y = pdf.get_y()
-            current_x = pdf.get_x()
-
-            # Enregistre la position initiale
-            lines = content.split('\n')
-            wrapped = [content[i:i+90] for i in range(0, len(content), 90)]
-
-            for line in wrapped:
-                pdf.multi_cell(col_widths[2], line_height, line, border=0)
-            end_y = pdf.get_y()
-
-            # Dessiner bordure autour du contenu manuellement
-            pdf.rect(current_x, current_y, col_widths[2], row_height)
-
-            # Position suivante : à gauche + plus bas
-            pdf.set_xy(x_start, y_start + row_height)
-
-        # Dossier documents
+        # Sauvegarde du PDF
         output_dir = "generated_docs"
         os.makedirs(output_dir, exist_ok=True)
-        filename = f"{output_dir}/rapport_{start}_to_{end}.pdf"
+        filename = f"{output_dir}/{rapport_title}.pdf"
         pdf.output(filename)
 
 
